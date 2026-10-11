@@ -135,6 +135,10 @@ class ARMCpuCore:
         self.anim_bridge = AnimationBridge(self)   # UIView animation blocks + CABasicAnimation (animations.py)
         self.anim = self.anim_bridge.engine        # tweens view.frame / alpha / transform into view.pres
         self.fonts = {}                     # UIFont obj -> point size
+        self._cb_pending = None             # on_return callback of the guest call currently running
+        self.index_paths = {}               # NSIndexPath obj -> (section, row)
+        self.table_styles = {}              # UITableViewController obj -> UITableViewStyle
+        self._cell_labels = {}              # (cell obj, 'textLabel'|'detailTextLabel') -> label obj
         self.openal = OpenALEmulator(self)  # OpenAL + AudioFile (the app's looping sound engine)
         self._drawing_view = 0
         self._touch_active = False
@@ -515,6 +519,8 @@ class ARMCpuCore:
                 tv.class_name = 'UITableView'
                 tv.bg_color = (255, 255, 255)
                 tv.frame = (0.0, 0.0, 320.0, 480.0)
+                tv.table_controller = receiver
+                tv.table_style = self.table_styles.get(receiver, 0)
             uc_engine.reg_write(arm_const.UC_ARM_REG_R0, self._uikit_objects[key])
             return True
 
@@ -726,6 +732,9 @@ class ARMCpuCore:
     # ---- running app code on demand (actions, timers, touches) ----
     def _drive_pending_actions(self, uc_engine):
         from objc_runtime import resolve_method
+        cb, self._cb_pending = self._cb_pending, None
+        if cb is not None:        # the previous guest call returned: hand its r0 to whoever asked (table datasource)
+            cb(uc_engine.reg_read(arm_const.UC_ARM_REG_R0), uc_engine.reg_read(arm_const.UC_ARM_REG_R1))
         while self._action_queue:
             item = self._action_queue.pop(0)
             target, sel = item['target'], item['sel']
@@ -733,7 +742,10 @@ class ARMCpuCore:
             imp = resolve_method(self.classes_by_addr, cls, sel) if cls else None
             if not imp:
                 logging.debug(f"[UIKit] no app implementation of {sel} on 0x{target:08X}; skipped")
+                if item.get('on_return') is not None:
+                    item['on_return'](0, 0)
                 continue
+            self._cb_pending = item.get('on_return')
             self._log_call('UIKit', self.classes_by_addr[cls]['name'], sel, imp)
             uc_engine.reg_write(arm_const.UC_ARM_REG_R0, target)
             uc_engine.reg_write(arm_const.UC_ARM_REG_R1, 0)
@@ -871,6 +883,7 @@ class ARMCpuCore:
                     t['active'] = False
         self.timers = [t for t in self.timers if t['active']]
         self.anim_bridge.tick(now)
+        self._tick_tables()
         self.accel.poll(now, self._action_queue, self.objc_alloc)
         self._request_redraw(now)
 
@@ -1287,6 +1300,27 @@ class ARMCpuCore:
             uc_engine.reg_write(R0, 1)
             return True
 
+        # ---------------- NSIndexPath (table rows) ----------------
+        if is_class and cls_name == 'NSIndexPath' and sel_name in ('indexPathForRow:inSection:', 'indexPathForItem:inSection:'):
+            ip = self.objc_alloc(0)
+            self.index_paths[ip] = (r3, r2)
+            uc_engine.reg_write(R0, ip)
+            return True
+        if receiver in self.index_paths:
+            sec_, row_ = self.index_paths[receiver]
+            if sel_name in ('row', 'item'):
+                uc_engine.reg_write(R0, row_)
+                return True
+            if sel_name == 'section':
+                uc_engine.reg_write(R0, sec_)
+                return True
+            if sel_name == 'length':
+                uc_engine.reg_write(R0, 2)
+                return True
+            if sel_name == 'indexAtPosition:':
+                uc_engine.reg_write(R0, (sec_, row_)[r2] if r2 < 2 else 0)
+                return True
+
         # ---------------- UIFont (only the point size matters here) ----------------
         if is_class and cls_name == 'UIFont' and sel_name in ('fontWithName:size:', 'systemFontOfSize:',
                                                               'boldSystemFontOfSize:', 'italicSystemFontOfSize:'):
@@ -1379,6 +1413,90 @@ class ARMCpuCore:
             as_f = struct.unpack('<f', struct.pack('<I', r2))[0]
             logging.info(f"[Watch] -[{cls_name} {sel_name}] arg as double={as_d:.4f} ({math.degrees(as_d):.1f} deg) "
                          f"as float={as_f:.4f} ({math.degrees(as_f):.1f} deg)  #{n + 1}")
+
+    # ------------------------------------------------------------------
+    # UITableView: ask the app's datasource for its rows and lay them out (Settings screen, etc.)
+    # ------------------------------------------------------------------
+    def _on_screen(self, v):
+        while v.parent is not None:
+            v = v.parent
+        return v in self.nib_roots
+
+    def _tick_tables(self):
+        for tv in list(self.guest_views.values()):
+            if tv.class_name == 'UITableView' and tv.table_state == 'new' and self._on_screen(tv):
+                self._load_table(tv)
+
+    def _load_table(self, tv):
+        from objc_runtime import resolve_method
+        ds = tv.table_ds or tv.table_controller
+        tv.table_state = 'done'
+        if not ds:
+            return
+        tv.table_state = 'loading'
+        tv_obj = tv.guest
+        dscls = self._class_of(ds)
+        has = lambda sel: bool(dscls and resolve_method(self.classes_by_addr, dscls, sel))
+        st = {'n': 1, 'counts': [], 'plan': [], 'cells': []}
+
+        def ask(sel, a2, a3, cb):
+            self._action_queue.append({'target': ds, 'sel': sel, 'arg2': a2, 'arg3': a3, 'on_return': cb})
+
+        def got_sections(n):
+            st['n'] = max(1, min(int(n) if n < 0x80000000 else 1, 16))
+            ask_count(0)
+
+        def ask_count(sec):
+            if sec >= st['n']:
+                st['plan'] = [(s_, r_) for s_ in range(st['n']) for r_ in range(st['counts'][s_])]
+                return ask_cell(0)
+            if not has('tableView:numberOfRowsInSection:'):
+                st['counts'].append(0)
+                return ask_count(sec + 1)
+            ask('tableView:numberOfRowsInSection:', tv_obj, sec, lambda r0, r1, sec=sec: (
+                st['counts'].append(min(r0, 200) if r0 < 0x80000000 else 0), ask_count(sec + 1)))
+
+        def ask_cell(i):
+            if i >= len(st['plan']):
+                return layout()
+            sec, row = st['plan'][i]
+            ip = self.objc_alloc(0)
+            self.index_paths[ip] = (sec, row)
+            ask('tableView:cellForRowAtIndexPath:', tv_obj, ip, lambda r0, r1, i=i: (st['cells'].append(r0), ask_cell(i + 1)))
+
+        def layout():
+            grouped = tv.table_style == 1
+            width = tv.frame[2] or 320.0
+            inset = 10.0 if grouped else 0.0
+            y, idx = 0.0, 0
+            for sec in range(st['n']):
+                y += 10.0 if grouped else 0.0                       # grouped tables leave a 10pt gap above a group
+                for _row in range(st['counts'][sec]):
+                    cell = st['cells'][idx] if idx < len(st['cells']) else 0
+                    idx += 1
+                    cv = self.guest_views.get(cell) if cell else None
+                    if cv is None:
+                        y += tv.row_height
+                        continue
+                    self._attach_subview(tv.guest, cell)
+                    cv.frame = (inset, y, width - 2 * inset, tv.row_height)
+                    cv.class_name = 'UITableViewCell'
+                    if cv.bg_color is None:
+                        cv.bg_color = (255, 255, 255)
+                    cv.text_inset = 15.0
+                    for lab in (self._cell_labels.get((cell, 'textLabel')),):
+                        lv = self.guest_views.get(lab) if lab else None
+                        if lv is not None:
+                            lv.frame = (15.0, 0.0, cv.frame[2] - 30.0, tv.row_height)
+                    y += tv.row_height
+                y += 10.0 if grouped else 0.0
+            tv.table_state = 'done'
+            logging.info(f"[UITableView] 0x{tv.guest:08X}: {len(st['plan'])} rows in {st['n']} section(s)")
+
+        if has('numberOfSectionsInTableView:'):
+            ask('numberOfSectionsInTableView:', tv_obj, 0, lambda r0, r1: got_sections(r0))
+        else:
+            got_sections(1)
 
     def _load_defaults(self):
         """Settings survive between launches like on a device (EMU_RESET_DEFAULTS=1 starts clean)."""
@@ -1763,6 +1881,65 @@ class ARMCpuCore:
             uc_engine.reg_write(R0, 0)      # empty NSUserDefaults: never echo the receiver as a truthy value
             return True
 
+        # --- UITableViewController / UITableView / UITableViewCell ---
+        if sel_name == 'initWithStyle:' and receiver not in self.classes_by_addr \
+                and self._inherits(self._class_of(receiver), 'UITableViewController'):
+            self.table_styles[receiver] = r2
+            uc_engine.reg_write(R0, receiver)
+            return True
+        if sel_name in ('initWithFrame:reuseIdentifier:', 'initWithStyle:reuseIdentifier:') and receiver not in self.classes_by_addr:
+            cv_ = self._get_view(receiver)
+            cv_.class_name = 'UITableViewCell'
+            cv_.frame = (0.0, 0.0, 320.0, 44.0)
+            cv_.bg_color = (255, 255, 255)
+            cv_.text_inset = 15.0
+            uc_engine.reg_write(R0, receiver)
+            return True
+        tvw = self.guest_views.get(receiver)
+        if tvw is not None and tvw.class_name == 'UITableView':
+            if sel_name == 'dequeueReusableCellWithIdentifier:':
+                uc_engine.reg_write(R0, 0)                       # nothing to reuse: the app builds its cells
+                return True
+            if sel_name == 'setDataSource:':
+                tvw.table_ds = r2
+                return True
+            if sel_name == 'setRowHeight:':
+                tvw.row_height = self._f32(r2)
+                return True
+            if sel_name == 'reloadData':
+                for c_ in [c for c in tvw.children if c.class_name == 'UITableViewCell']:
+                    tvw.children.remove(c_)
+                    c_.parent = None
+                tvw.table_state = 'new'
+                return True
+            if sel_name in ('setDelegate:', 'setSeparatorStyle:', 'setSectionHeaderHeight:', 'setSectionFooterHeight:',
+                            'setAllowsSelection:', 'setScrollEnabled:', 'setSeparatorColor:', 'setBackgroundView:'):
+                return True
+        if tvw is not None and tvw.class_name == 'UITableViewCell':
+            if sel_name in ('textLabel', 'detailTextLabel'):
+                key = (receiver, sel_name)
+                if key not in self._cell_labels:
+                    lab = self.objc_alloc(0)
+                    lv = self._get_view(lab)
+                    lv.class_name = 'UILabel'
+                    lv.frame = (15.0, 0.0, max(10.0, tvw.frame[2] - 30.0), tvw.frame[3])
+                    lv.text_align = 0
+                    self._cell_labels[key] = lab
+                    self._attach_subview(receiver, lab)
+                uc_engine.reg_write(R0, self._cell_labels[key])
+                return True
+            if sel_name == 'contentView':
+                uc_engine.reg_write(R0, receiver)
+                return True
+            if sel_name == 'setAccessoryView:' and r2 and r2 in self.guest_views:
+                acc = self.guest_views[r2]
+                self._attach_subview(receiver, r2)
+                acc.frame = (tvw.frame[2] - acc.frame[2] - 12.0, (tvw.frame[3] - acc.frame[3]) / 2.0, acc.frame[2], acc.frame[3])
+                return True
+            if sel_name in ('setSelectionStyle:', 'setAccessoryType:', 'setSelectedBackgroundView:',
+                            'setBackgroundView:', 'setEditingAccessoryType:'):
+                return True
+
         # --- per-view properties: tag, UISwitch state, UIImageView frame animation, transforms ---
         pv = self.guest_views.get(receiver)
         if pv is None and receiver not in self.classes_by_addr and sel_name in (
@@ -2014,7 +2191,8 @@ class ARMCpuCore:
                 if text is not None:
                     v.text = text
             elif sel_name == 'setBackgroundColor:':
-                v.bg_color = self.color_objs.get(r2)
+                if v.class_name != 'UITableView':          # tables stay white, like the stock Settings page
+                    v.bg_color = self.color_objs.get(r2)
             elif sel_name == 'setTextColor:':
                 v.text_color = self.color_objs.get(r2) or v.text_color
             uc_engine.reg_write(R0, receiver)
