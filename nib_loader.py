@@ -163,6 +163,12 @@ class NibView:
         self.tag = int(node.get('UITag') or 0)
         self.on = bool(node.get('UIOn', False))   # UISwitch state
         self.on_set = False                   # True once the app (or a tap) has set the switch
+        self.table_style = 0                  # UITableView: 0 plain, 1 grouped
+        self.table_ds = 0                     # UITableView.dataSource (guest object); 0 = its controller
+        self.table_controller = 0             # the UITableViewController whose view this is
+        self.table_state = 'new'              # 'new' -> 'loading' -> 'done' (rows built from the datasource)
+        self.row_height = 44.0
+        self.text_inset = 0.0                 # left padding for text (table cells)
         self.pres = None                      # in-flight animated values {'frame'|'alpha'|'transform': v} (animations.py)
         self.state_images = None              # {UIControlState: Surface} from setImage:/setBackgroundImage:forState:
         self.selected = False
@@ -578,6 +584,9 @@ class UIKitRenderer:
         if view.class_name == 'UISwitch':
             self._draw_switch(target, rect, view, eff)
 
+        if view.class_name == 'UITableViewCell':                 # hairline between rows, like the stock table
+            pygame.draw.line(target, (205, 205, 205), (rect.x, rect.bottom - 1), (rect.right, rect.bottom - 1))
+
         if view.text:
             font = self._font_for(view.font_size)
             color = self._readable(target, view.text_color, rect)
@@ -590,7 +599,7 @@ class UIKitRenderer:
                 elif view.text_align == 2:
                     lx = rect.right - label.get_width()
                 else:
-                    lx = rect.x
+                    lx = rect.x + int(view.text_inset)
                 self._blit_alpha(target, label, (lx, ty), eff)
                 ty += label.get_height()
 
