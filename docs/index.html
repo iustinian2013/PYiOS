@@ -350,4 +350,787 @@
 
                 <div>
                     <label class="block text-xs font-bold text-slate-700 uppercase mb-1">PYiOS Emulator Version Used</label>
-                    <input type="text" id="emulator-version-input" required class="w-full px-3 p
+                    <input type="text" id="emulator-version-input" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="e.g. v1.0.1">
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Compatibility Rating (1-5)</label>
+                    <select id="app-rating-input" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                        <option value="1">1 / 5 - App fully not working / Black screen</option>
+                        <option value="2">2 / 5 - Only intro/menu working</option>
+                        <option value="3">3 / 5 - Partial function with major bugs</option>
+                        <option value="4">4 / 5 - Works with minor issues</option>
+                        <option value="5">5 / 5 - Fully usable and working</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Testing Notes / Feedback</label>
+                    <textarea id="app-notes-input" rows="3" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Describe what works and what doesn't..."></textarea>
+                </div>
+
+                <div class="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
+                    <button type="button" onclick="closeModal()" class="w-full sm:w-auto px-4 py-2 rounded-md text-xs font-semibold btn-glossy-silver">Cancel</button>
+                    <button type="submit" id="submit-btn" disabled class="w-full sm:w-auto px-4 py-2 rounded-md text-xs font-bold text-white btn-glossy-blue opacity-50 cursor-not-allowed">Submit Report</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal for Reporting Bugs -->
+    <div id="bug-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+        <div class="ios-card max-w-lg w-full p-4 sm:p-6 bg-white shadow-2xl relative max-h-[90vh] overflow-y-auto">
+            <h3 class="text-base sm:text-lg font-bold text-slate-900 mb-4 flex items-center justify-between">
+                <span>Report Emulator Bug</span>
+                <button onclick="closeBugModal()" class="text-slate-400 hover:text-slate-600 p-1"><i class="fa-solid fa-xmark text-lg"></i></button>
+            </h3>
+
+            <div id="bug-auth-warning" class="mb-4 p-3 bg-amber-50 border border-amber-200 text-amber-900 text-xs rounded">
+                <i class="fa-solid fa-circle-exclamation mr-1"></i> Please sign in with GitHub using the top right button before submitting bug reports.
+            </div>
+
+            <form id="bug-form" onsubmit="handleBugSubmission(event)" class="space-y-3 sm:space-y-4">
+                <div>
+                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Issue Title / Summary</label>
+                    <input type="text" id="bug-title-input" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="e.g. Crash when launching audio subsystem">
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Severity Level</label>
+                    <select id="bug-severity-input" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                        <option value="Low">Low - Minor cosmetic or non-blocking issue</option>
+                        <option value="Medium" selected>Medium - Functional bug with workaround</option>
+                        <option value="High">High - Major subsystem failure</option>
+                        <option value="Critical">Critical - Emulator crash / Lockup</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Detailed Description & Steps to Reproduce</label>
+                    <textarea id="bug-desc-input" rows="4" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Provide system specs, error logs, or steps to trigger the bug..."></textarea>
+                </div>
+
+                <div class="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
+                    <button type="button" onclick="closeBugModal()" class="w-full sm:w-auto px-4 py-2 rounded-md text-xs font-semibold btn-glossy-silver">Cancel</button>
+                    <button type="submit" id="bug-submit-btn" disabled class="w-full sm:w-auto px-4 py-2 rounded-md text-xs font-bold text-white btn-glossy-blue opacity-50 cursor-not-allowed">Submit Bug Ticket</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal for Editing Apps (Admin) -->
+    <div id="edit-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+        <div class="ios-card max-w-lg w-full p-4 sm:p-6 bg-white shadow-2xl relative max-h-[90vh] overflow-y-auto">
+            <h3 class="text-base sm:text-lg font-bold text-slate-900 mb-4 flex items-center justify-between">
+                <span>Edit Application Entry</span>
+                <button onclick="closeEditModal()" class="text-slate-400 hover:text-slate-600 p-1"><i class="fa-solid fa-xmark text-lg"></i></button>
+            </h3>
+
+            <form id="edit-form" onsubmit="handleAppEdit(event)" class="space-y-3 sm:space-y-4">
+                <input type="hidden" id="edit-app-id">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs font-bold text-slate-700 uppercase mb-1">App Name</label>
+                        <input type="text" id="edit-name-input" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-700 uppercase mb-1">App Version</label>
+                        <input type="text" id="edit-version-input" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1">PYiOS Emulator Version Used</label>
+                    <input type="text" id="edit-emulator-version-input" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Compatibility Rating (1-5)</label>
+                    <select id="edit-rating-input" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                        <option value="1">1 / 5 - Not working</option>
+                        <option value="2">2 / 5 - Intro only</option>
+                        <option value="3">3 / 5 - Partial bugs</option>
+                        <option value="4">4 / 5 - Mostly working</option>
+                        <option value="5">5 / 5 - Fully working</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Testing Notes</label>
+                    <textarea id="edit-notes-input" rows="3" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none"></textarea>
+                </div>
+
+                <div class="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
+                    <button type="button" onclick="closeEditModal()" class="w-full sm:w-auto px-4 py-2 rounded-md text-xs font-semibold btn-glossy-silver">Cancel</button>
+                    <button type="submit" class="w-full sm:w-auto px-4 py-2 rounded-md text-xs font-bold text-white btn-glossy-blue">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal for Creating/Editing Announcements -->
+    <div id="announcement-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+        <div class="ios-card max-w-lg w-full p-4 sm:p-6 bg-white shadow-2xl relative max-h-[90vh] overflow-y-auto">
+            <h3 class="text-base sm:text-lg font-bold text-slate-900 mb-4 flex items-center justify-between">
+                <span id="announcement-modal-title">Create Announcement</span>
+                <button onclick="closeAnnouncementModal()" class="text-slate-400 hover:text-slate-600 p-1"><i class="fa-solid fa-xmark text-lg"></i></button>
+            </h3>
+
+            <form id="announcement-form" onsubmit="handleAnnouncementSubmit(event)" class="space-y-3 sm:space-y-4">
+                <input type="hidden" id="announcement-id">
+                <div>
+                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Title</label>
+                    <input type="text" id="announcement-title-input" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="e.g. Important Update v1.0.1">
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Content / Message</label>
+                    <textarea id="announcement-content-input" rows="3" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Announcement details..."></textarea>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Expiration Date (Optional - leaves permanent if empty)</label>
+                    <input type="datetime-local" id="announcement-expires-input" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                </div>
+
+                <div class="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
+                    <button type="button" onclick="closeAnnouncementModal()" class="w-full sm:w-auto px-4 py-2 rounded-md text-xs font-semibold btn-glossy-silver">Cancel</button>
+                    <button type="submit" class="w-full sm:w-auto px-4 py-2 rounded-md text-xs font-bold text-white btn-glossy-blue">Save Announcement</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Full, Un-shortened Client Logic -->
+    <script>
+        const SUPABASE_URL = 'https://dkvsbywlcqxdqksmclhx.supabase.co';
+        const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_afsugvjUbqI90eFzSYzywQ_qFC3np6T';
+        
+        const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+        let currentUser = null;
+        let isAdmin = false;
+
+        window.onload = async function() {
+            try {
+                const { data: { session } } = await supabaseClient.auth.getSession();
+                if (session && session.user) {
+                    currentUser = session.user.user_metadata.user_name || session.user.email;
+                    isAdmin = (currentUser.toLowerCase() === 'iustinian2013');
+                }
+            } catch (err) {
+                console.error("Session initialization error:", err);
+            }
+            
+            updateAuthUI();
+            loadDatabases();
+            loadAnnouncements();
+            loadBugReports();
+            loadCompatibilityNotice();
+        };
+
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            const target = document.getElementById('view-' + tabId);
+            if (target) {
+                target.classList.add('active');
+            }
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        async function loginWithGitHub() {
+            try {
+                const { error } = await supabaseClient.auth.signInWithOAuth({
+                    provider: 'github',
+                    options: { 
+                        redirectTo: window.location.origin + window.location.pathname 
+                    }
+                });
+                if (error) {
+                    alert("GitHub Auth Error: " + error.message);
+                }
+            } catch (err) {
+                alert("Unexpected login error. Check console (F12).");
+                console.error(err);
+            }
+        }
+
+        async function logout() {
+            await supabaseClient.auth.signOut();
+            currentUser = null;
+            isAdmin = false;
+            updateAuthUI();
+            switchTab('home');
+            loadDatabases();
+            loadAnnouncements();
+            loadBugReports();
+            loadCompatibilityNotice();
+            alert("Signed out successfully.");
+        }
+
+        function updateAuthUI() {
+            const container = document.getElementById('authContainer');
+            const adminTab = document.getElementById('admin-nav-tab');
+            const submitBtnLabel = document.getElementById('submit-btn-label');
+
+            if (currentUser) {
+                isAdmin = (currentUser.toLowerCase() === 'iustinian2013');
+                container.innerHTML = `
+                    <div class="flex items-center space-x-2 bg-black/20 p-1 pl-2.5 pr-1.5 rounded-md border border-white/20 text-xs text-white">
+                        <span class="font-bold flex items-center truncate max-w-[120px] sm:max-w-none">
+                            ${isAdmin ? '<i class="fa-solid fa-crown text-amber-400 mr-1.5 shrink-0" title="Admin"></i>' : '<i class="fa-brands fa-github mr-1.5 shrink-0"></i>'}
+                            @${currentUser}
+                        </span>
+                        <button onclick="logout()" class="px-2 py-0.5 rounded text-[10px] btn-glossy-silver shrink-0">Sign Out</button>
+                    </div>
+                `;
+                
+                if (isAdmin) {
+                    if (adminTab) adminTab.classList.remove('hidden');
+                    if (submitBtnLabel) submitBtnLabel.innerText = 'Submit App';
+                } else {
+                    if (adminTab) adminTab.classList.add('hidden');
+                    if (submitBtnLabel) submitBtnLabel.innerText = 'Submit New App';
+                }
+
+                const authWarning = document.getElementById('modal-auth-warning');
+                const submitBtn = document.getElementById('submit-btn');
+                if (authWarning) authWarning.classList.add('hidden');
+                if (submitBtn) {
+                    submitBtn.removeAttribute('disabled');
+                    submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                }
+
+                const bugWarning = document.getElementById('bug-auth-warning');
+                const bugSubmitBtn = document.getElementById('bug-submit-btn');
+                if (bugWarning) bugWarning.classList.add('hidden');
+                if (bugSubmitBtn) {
+                    bugSubmitBtn.removeAttribute('disabled');
+                    bugSubmitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                }
+            } else {
+                container.innerHTML = `
+                    <button onclick="loginWithGitHub()" class="px-3.5 py-1.5 rounded-md text-xs font-bold btn-github flex items-center space-x-2 transition-colors">
+                        <i class="fa-brands fa-github text-sm"></i>
+                        <span>Sign in with GitHub</span>
+                    </button>
+                `;
+                if (adminTab) adminTab.classList.add('hidden');
+                if (submitBtnLabel) submitBtnLabel.innerText = 'Submit New App';
+            }
+        }
+
+        async function loadCompatibilityNotice() {
+            const { data, error } = await supabaseClient.from('site_settings').select('*').eq('key', 'compatibility_notice').single();
+            const wrapper = document.getElementById('home-notice-wrapper');
+            const adminInput = document.getElementById('admin-notice-input');
+
+            if (error || !data || !data.value) {
+                if (wrapper) wrapper.innerHTML = '';
+                if (adminInput) adminInput.value = '';
+                return;
+            }
+
+            if (adminInput) adminInput.value = data.value;
+
+            if (wrapper) {
+                wrapper.innerHTML = `
+                    <div class="ios-card p-4 bg-amber-50 border-amber-200 flex items-start space-x-3 text-amber-900 text-xs sm:text-sm">
+                        <i class="fa-solid fa-triangle-exclamation text-amber-600 text-lg mt-0.5 shrink-0"></i>
+                        <div>
+                            <strong>Compatibility Notice:</strong> ${data.value}
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        async function saveCompatibilityNotice() {
+            if (!isAdmin) return;
+            const newVal = document.getElementById('admin-notice-input').value.trim();
+
+            const { error } = await supabaseClient.from('site_settings')
+                .update({ value: newVal, updated_at: new Date().toISOString() })
+                .eq('key', 'compatibility_notice');
+
+            if (error) {
+                alert("Error updating compatibility notice: " + error.message);
+            } else {
+                alert("Compatibility notice successfully updated!");
+                loadCompatibilityNotice();
+            }
+        }
+
+        function openSubmitModal() {
+            const modal = document.getElementById('submit-modal');
+            if (modal) modal.classList.remove('hidden');
+            if (isAdmin) {
+                document.getElementById('modal-title-text').innerText = 'Submit App';
+                document.getElementById('submit-btn').innerText = 'Submit App';
+            } else {
+                document.getElementById('modal-title-text').innerText = 'Submit App Compatibility Report';
+                document.getElementById('submit-btn').innerText = 'Submit Report';
+            }
+            if (currentUser) {
+                document.getElementById('modal-auth-warning').classList.add('hidden');
+                document.getElementById('submit-btn').removeAttribute('disabled');
+                document.getElementById('submit-btn').classList.remove('opacity-50', 'cursor-not-allowed');
+            } else {
+                document.getElementById('modal-auth-warning').classList.remove('hidden');
+                document.getElementById('submit-btn').setAttribute('disabled', 'true');
+                document.getElementById('submit-btn').classList.add('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('submit-modal');
+            if (modal) modal.classList.add('hidden');
+            const form = document.getElementById('submit-form');
+            if (form) form.reset();
+        }
+
+        function openBugModal() {
+            const modal = document.getElementById('bug-modal');
+            if (modal) modal.classList.remove('hidden');
+            if (currentUser) {
+                document.getElementById('bug-auth-warning').classList.add('hidden');
+                document.getElementById('bug-submit-btn').removeAttribute('disabled');
+                document.getElementById('bug-submit-btn').classList.remove('opacity-50', 'cursor-not-allowed');
+            } else {
+                document.getElementById('bug-auth-warning').classList.remove('hidden');
+                document.getElementById('bug-submit-btn').setAttribute('disabled', 'true');
+                document.getElementById('bug-submit-btn').classList.add('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        function closeBugModal() {
+            const modal = document.getElementById('bug-modal');
+            if (modal) modal.classList.add('hidden');
+            const form = document.getElementById('bug-form');
+            if (form) form.reset();
+        }
+
+        function openEditModal(id, name, version, emulatorVersion, rating, notes) {
+            document.getElementById('edit-app-id').value = id;
+            document.getElementById('edit-name-input').value = name;
+            document.getElementById('edit-version-input').value = version || '1.0';
+            document.getElementById('edit-emulator-version-input').value = emulatorVersion || 'v1.0.1';
+            document.getElementById('edit-rating-input').value = rating;
+            document.getElementById('edit-notes-input').value = notes || '';
+            document.getElementById('edit-modal').classList.remove('hidden');
+        }
+
+        function closeEditModal() {
+            document.getElementById('edit-modal').classList.add('hidden');
+            document.getElementById('edit-form').reset();
+        }
+
+        function openAnnouncementModal(id = '', title = '', content = '', expiresAt = '') {
+            document.getElementById('announcement-id').value = id;
+            document.getElementById('announcement-title-input').value = title;
+            document.getElementById('announcement-content-input').value = content;
+            document.getElementById('announcement-expires-input').value = expiresAt ? expiresAt.slice(0, 16) : '';
+            document.getElementById('announcement-modal-title').innerText = id ? 'Edit Announcement' : 'Create Announcement';
+            document.getElementById('announcement-modal').classList.remove('hidden');
+        }
+
+        function closeAnnouncementModal() {
+            document.getElementById('announcement-modal').classList.add('hidden');
+            document.getElementById('announcement-form').reset();
+        }
+
+        async function loadDatabases() {
+            await loadPublicDatabase();
+            if (isAdmin) {
+                await loadAdminSubmissions();
+            }
+        }
+
+        async function loadAnnouncements() {
+            const { data, error } = await supabaseClient.from('announcements').select('*').order('created_at', { ascending: false });
+            const container = document.getElementById('announcements-container');
+            const adminList = document.getElementById('admin-announcement-list');
+            const countEl = document.getElementById('announcement-count');
+
+            if (error || !data) {
+                if (container) container.innerHTML = '';
+                if (adminList) adminList.innerHTML = `<div class="p-4 text-center text-xs text-slate-500">No announcements table or error loading.</div>`;
+                return;
+            }
+
+            const now = new Date();
+            const activeAnnouncements = data.filter(item => {
+                if (!item.expires_at) return true;
+                return new Date(item.expires_at) > now;
+            });
+
+            if (container) {
+                container.innerHTML = '';
+                activeAnnouncements.forEach(ann => {
+                    const banner = document.createElement('div');
+                    banner.className = 'ios-card p-4 bg-blue-50 border-blue-200 text-blue-900 text-xs sm:text-sm flex items-start space-x-3 shadow-sm';
+                    banner.innerHTML = `
+                        <i class="fa-solid fa-bullhorn text-blue-600 text-base mt-0.5 shrink-0"></i>
+                        <div class="flex-grow">
+                            <strong class="font-bold text-blue-950">${ann.title}</strong>
+                            <p class="mt-0.5 text-slate-700">${ann.content}</p>
+                            ${ann.expires_at ? `<span class="text-[10px] text-blue-600 block mt-1"><i class="fa-regular fa-clock mr-1"></i> Temporary • Expires: ${new Date(ann.expires_at).toLocaleString()}</span>` : ''}
+                        </div>
+                    `;
+                    container.appendChild(banner);
+                });
+            }
+
+            if (adminList && countEl) {
+                countEl.innerText = `${data.length} total`;
+                if (data.length === 0) {
+                    adminList.innerHTML = `<div class="p-4 text-center text-xs text-slate-500">No announcements created yet.</div>`;
+                } else {
+                    adminList.innerHTML = '';
+                    data.forEach(ann => {
+                        const isExpired = ann.expires_at && new Date(ann.expires_at) <= now;
+                        const statusBadge = isExpired 
+                            ? `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-300">Expired</span>` 
+                            : (ann.expires_at ? `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-300">Temporary</span>` : `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-800 border border-green-300">Permanent</span>`);
+
+                        const row = document.createElement('div');
+                        row.className = 'p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white hover:bg-slate-50 transition-colors';
+                        row.innerHTML = `
+                            <div class="space-y-1">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <span class="font-bold text-slate-900 text-sm">${ann.title}</span>
+                                    ${statusBadge}
+                                </div>
+                                <p class="text-xs text-slate-600">${ann.content}</p>
+                                <div class="text-[11px] text-slate-400">${ann.expires_at ? 'Expires: ' + new Date(ann.expires_at).toLocaleString() : 'No expiration'}</div>
+                            </div>
+                            <div class="flex items-center gap-2 shrink-0">
+                                <button onclick="openAnnouncementModal('${ann.id}', '${ann.title.replace(/'/g, "\\'")}', '${ann.content.replace(/'/g, "\\'")}', '${ann.expires_at || ''}')" class="px-2.5 py-1 rounded text-xs font-bold btn-glossy-silver"><i class="fa-solid fa-pen mr-1"></i> Edit</button>
+                                <button onclick="deleteAnnouncement('${ann.id}')" class="px-2.5 py-1 rounded text-xs font-bold bg-red-600 text-white hover:bg-red-700 shadow-sm"><i class="fa-solid fa-trash mr-1"></i> Delete</button>
+                            </div>
+                        `;
+                        adminList.appendChild(row);
+                    });
+                }
+            }
+        }
+
+        async function loadBugReports() {
+            const { data, error } = await supabaseClient.from('bug_reports').select('*').order('created_at', { ascending: false });
+            const list = document.getElementById('bug-report-list');
+            const adminBugList = document.getElementById('admin-bug-list');
+            const adminBugCount = document.getElementById('admin-bug-count');
+
+            if (error || !data) {
+                if (list) list.innerHTML = `<div class="p-4 text-center text-xs text-slate-500">No bug reports table found or error loading.</div>`;
+                if (adminBugList) adminBugList.innerHTML = `<div class="p-4 text-center text-xs text-slate-500">No bug reports table found.</div>`;
+                return;
+            }
+
+            if (list) {
+                if (data.length === 0) {
+                    list.innerHTML = `<div class="p-4 text-center text-xs text-slate-500">No bug reports submitted yet. Everything is running smoothly!</div>`;
+                } else {
+                    list.innerHTML = '';
+                    data.forEach(bug => {
+                        const sevColor = bug.severity === 'Critical' ? 'bg-red-100 text-red-800 border-red-300' : (bug.severity === 'High' ? 'bg-orange-100 text-orange-800 border-orange-300' : 'bg-amber-100 text-amber-800 border-amber-300');
+                        const statusColor = bug.status === 'Resolved' ? 'bg-green-100 text-green-800 border-green-300' : (bug.status === 'In Progress' ? 'bg-blue-100 text-blue-800 border-blue-300' : 'bg-slate-100 text-slate-800 border-slate-300');
+
+                        const item = document.createElement('div');
+                        item.className = 'p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-white hover:bg-slate-50 transition-colors';
+                        item.innerHTML = `
+                            <div class="space-y-1">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <span class="font-bold text-slate-900 text-sm">${bug.title}</span>
+                                    <span class="px-2 py-0.5 rounded text-[10px] font-bold border ${sevColor}">${bug.severity}</span>
+                                </div>
+                                <p class="text-xs text-slate-600">${bug.description}</p>
+                                <div class="text-[11px] text-slate-400">Reported by @${bug.author || 'unknown'} on ${new Date(bug.created_at).toLocaleDateString()}</div>
+                            </div>
+                            <div>
+                                <span class="px-2.5 py-1 rounded-full text-xs font-bold border ${statusColor}">
+                                    ${bug.status || 'Open'}
+                                </span>
+                            </div>
+                        `;
+                        list.appendChild(item);
+                    });
+                }
+            }
+
+            if (adminBugList && adminBugCount) {
+                adminBugCount.innerText = `${data.length} bugs`;
+                if (data.length === 0) {
+                    adminBugList.innerHTML = `<div class="p-4 text-center text-xs text-slate-500">No bug reports found.</div>`;
+                } else {
+                    adminBugList.innerHTML = '';
+                    data.forEach(bug => {
+                        const row = document.createElement('div');
+                        row.className = 'p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white hover:bg-slate-50 transition-colors';
+                        row.innerHTML = `
+                            <div class="space-y-1">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <span class="font-bold text-slate-900 text-sm">${bug.title}</span>
+                                    <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-800 border">${bug.severity}</span>
+                                    <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800 border">${bug.status || 'Open'}</span>
+                                </div>
+                                <p class="text-xs text-slate-600">${bug.description}</p>
+                                <div class="text-[11px] text-slate-400">By @${bug.author || 'unknown'} on ${new Date(bug.created_at).toLocaleDateString()}</div>
+                            </div>
+                            <div class="flex flex-wrap items-center gap-2 shrink-0 pt-2 sm:pt-0">
+                                ${bug.status !== 'Resolved' ? `<button onclick="updateBugStatus('${bug.id}', 'Resolved')" class="px-2.5 py-1 rounded text-xs font-bold bg-green-600 text-white hover:bg-green-700 shadow-sm"><i class="fa-solid fa-check mr-1"></i> Resolve</button>` : `<button onclick="updateBugStatus('${bug.id}', 'Open')" class="px-2.5 py-1 rounded text-xs font-bold bg-amber-600 text-white hover:bg-amber-700 shadow-sm"><i class="fa-solid fa-rotate-left mr-1"></i> Reopen</button>`}
+                                <button onclick="deleteBug('${bug.id}')" class="px-2.5 py-1 rounded text-xs font-bold bg-red-600 text-white hover:bg-red-700 shadow-sm"><i class="fa-solid fa-trash mr-1"></i> Delete</button>
+                            </div>
+                        `;
+                        adminBugList.appendChild(row);
+                    });
+                }
+            }
+        }
+
+        async function handleBugSubmission(event) {
+            event.preventDefault();
+            if (!currentUser) {
+                alert("Please sign in with GitHub first.");
+                return;
+            }
+
+            const title = document.getElementById('bug-title-input').value;
+            const severity = document.getElementById('bug-severity-input').value;
+            const description = document.getElementById('bug-desc-input').value;
+
+            const { error } = await supabaseClient.from('bug_reports').insert([
+                { title: title, severity: severity, description: description, status: 'Open', author: currentUser }
+            ]);
+
+            if (error) {
+                alert("Error submitting bug report: " + error.message);
+            } else {
+                alert("Bug report submitted successfully!");
+                closeBugModal();
+                loadBugReports();
+            }
+        }
+
+        async function updateBugStatus(id, newStatus) {
+            const { error } = await supabaseClient.from('bug_reports').update({ status: newStatus }).eq('id', id);
+            if (error) {
+                alert("Error updating bug status: " + error.message);
+            } else {
+                loadBugReports();
+            }
+        }
+
+        async function deleteBug(id) {
+            if (!confirm("Are you sure you want to delete this bug report?")) return;
+            const { error } = await supabaseClient.from('bug_reports').delete().eq('id', id);
+            if (error) {
+                alert("Error deleting bug report: " + error.message);
+            } else {
+                loadBugReports();
+            }
+        }
+
+        async function handleAnnouncementSubmit(event) {
+            event.preventDefault();
+            const id = document.getElementById('announcement-id').value;
+            const title = document.getElementById('announcement-title-input').value;
+            const content = document.getElementById('announcement-content-input').value;
+            const expiresAt = document.getElementById('announcement-expires-input').value;
+
+            const payload = {
+                title: title,
+                content: content,
+                expires_at: expiresAt ? new Date(expiresAt).toISOString() : null
+            };
+
+            let error;
+            if (id) {
+                const res = await supabaseClient.from('announcements').update(payload).eq('id', id);
+                error = res.error;
+            } else {
+                const res = await supabaseClient.from('announcements').insert([payload]);
+                error = res.error;
+            }
+
+            if (error) {
+                alert("Error saving announcement: " + error.message);
+            } else {
+                alert("Announcement saved successfully!");
+                closeAnnouncementModal();
+                loadAnnouncements();
+            }
+        }
+
+        async function deleteAnnouncement(id) {
+            if (!confirm("Are you sure you want to delete this announcement?")) return;
+
+            const { error } = await supabaseClient.from('announcements').delete().eq('id', id);
+            if (error) {
+                alert("Error deleting announcement: " + error.message);
+            } else {
+                loadAnnouncements();
+            }
+        }
+
+        async function loadPublicDatabase() {
+            const { data, error } = await supabaseClient.from('app_compatibility').select('*').order('created_at', { ascending: false });
+            const list = document.getElementById('app-database-list');
+            
+            if (error || !data) {
+                if (list) list.innerHTML = `<div class="p-4 text-center text-xs text-slate-500">Error loading app compatibility table. Check console.</div>`;
+                return;
+            }
+
+            const publicApps = data.filter(app => app.status === 'approved' || !app.status);
+            
+            if (publicApps.length === 0) {
+                if (list) list.innerHTML = `<div class="p-4 text-center text-xs text-slate-500">No approved apps in the database yet. Check back soon!</div>`;
+                return;
+            }
+
+            if (list) {
+                list.innerHTML = '';
+                publicApps.forEach(app => {
+                    const item = document.createElement('div');
+                    item.className = 'p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-white hover:bg-slate-50 transition-colors';
+                    item.innerHTML = `
+                        <div>
+                            <div class="font-bold text-slate-900 text-sm">${app.name} <span class="text-xs font-normal text-slate-500">(v${app.version || '1.0'})</span></div>
+                            <div class="text-xs text-slate-500">${app.notes || 'No notes'} • PYiOS: <span class="font-medium text-slate-700">${app.emulator_version || 'v1.0.1'}</span> • By @${app.author || 'unknown'}</div>
+                        </div>
+                        <div class="flex items-center justify-between sm:justify-end">
+                            <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-green-100 text-green-800 border border-green-300">
+                                ${app.rating} / 5
+                            </span>
+                        </div>
+                    `;
+                    list.appendChild(item);
+                });
+            }
+        }
+
+        async function loadAdminSubmissions() {
+            const { data, error } = await supabaseClient.from('app_compatibility').select('*').order('created_at', { ascending: false });
+            const list = document.getElementById('admin-app-list');
+            const countEl = document.getElementById('admin-count');
+
+            if (error || !data) {
+                if (list) list.innerHTML = `<div class="p-4 text-center text-xs text-red-500">Error loading admin database: ${error ? error.message : 'Unknown'}</div>`;
+                return;
+            }
+
+            if (countEl) countEl.innerText = `${data.length} total apps`;
+            if (data.length === 0) {
+                if (list) list.innerHTML = `<div class="p-4 text-center text-xs text-slate-500">No submissions found.</div>`;
+                return;
+            }
+
+            if (list) {
+                list.innerHTML = '';
+                data.forEach(app => {
+                    const status = app.status || 'approved';
+                    const statusBadge = status === 'approved' 
+                        ? `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-800 border border-green-300">Approved</span>`
+                        : `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300">Pending</span>`;
+
+                    const item = document.createElement('div');
+                    item.className = 'p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white hover:bg-slate-50 transition-colors';
+                    item.innerHTML = `
+                        <div class="space-y-1">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <span class="font-bold text-slate-900 text-sm">${app.name} (v${app.version || '1.0'})</span>
+                                ${statusBadge}
+                                <span class="text-xs font-semibold text-blue-600">(${app.rating}/5)</span>
+                            </div>
+                            <p class="text-xs text-slate-600">${app.notes || 'No testing notes'}</p>
+                            <div class="text-[11px] text-slate-400">Emulator: <span class="font-medium text-slate-600">${app.emulator_version || 'v1.0.1'}</span> • By @${app.author || 'unknown'} on ${new Date(app.created_at).toLocaleDateString()}</div>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-2 shrink-0 pt-2 sm:pt-0">
+                            ${status !== 'approved' ? `<button onclick="updateAppStatus('${app.id}', 'approved')" class="px-2.5 py-1 rounded text-xs font-bold bg-green-600 text-white hover:bg-green-700 shadow-sm flex-1 sm:flex-none text-center"><i class="fa-solid fa-check mr-1"></i> Approve</button>` : ''}
+                            <button onclick="openEditModal('${app.id}', '${app.name.replace(/'/g, "\\'")}', '${app.version || '1.0'}', '${app.emulator_version || 'v1.0.1'}', '${app.rating}', '${(app.notes || '').replace(/'/g, "\\'")}')" class="px-2.5 py-1 rounded text-xs font-bold btn-glossy-silver flex-1 sm:flex-none text-center"><i class="fa-solid fa-pen mr-1"></i> Edit</button>
+                            <button onclick="deleteApp('${app.id}')" class="px-2.5 py-1 rounded text-xs font-bold bg-red-600 text-white hover:bg-red-700 shadow-sm flex-1 sm:flex-none text-center"><i class="fa-solid fa-trash mr-1"></i> Delete</button>
+                        </div>
+                    `;
+                    list.appendChild(item);
+                });
+            }
+        }
+
+        async function handleAppSubmission(event) {
+            event.preventDefault();
+            if (!currentUser) {
+                alert("Please sign in with GitHub first.");
+                return;
+            }
+
+            const appName = document.getElementById('app-name-input').value;
+            const appVersion = document.getElementById('app-version-input').value;
+            const emulatorVersion = document.getElementById('emulator-version-input').value;
+            const rating = parseInt(document.getElementById('app-rating-input').value);
+            const notes = document.getElementById('app-notes-input').value;
+
+            const initialStatus = isAdmin ? 'approved' : 'pending';
+
+            const { error } = await supabaseClient.from('app_compatibility').insert([
+                { name: appName, version: appVersion, emulator_version: emulatorVersion, rating: rating, notes: notes, author: currentUser, status: initialStatus }
+            ]);
+
+            if (error) {
+                alert("Error saving to database: " + error.message);
+            } else {
+                alert(isAdmin ? "App submitted and instantly approved!" : "Compatibility report submitted for admin approval!");
+                loadDatabases();
+            }
+            closeModal();
+        }
+
+        async function handleAppEdit(event) {
+            event.preventDefault();
+            const id = document.getElementById('edit-app-id').value;
+            const name = document.getElementById('edit-name-input').value;
+            const version = document.getElementById('edit-version-input').value;
+            const emulatorVersion = document.getElementById('edit-emulator-version-input').value;
+            const rating = parseInt(document.getElementById('edit-rating-input').value);
+            const notes = document.getElementById('edit-notes-input').value;
+
+            const { error } = await supabaseClient.from('app_compatibility')
+                .update({ name: name, version: version, emulator_version: emulatorVersion, rating: rating, notes: notes })
+                .eq('id', id);
+
+            if (error) {
+                alert("Error updating entry: " + error.message);
+            } else {
+                alert("Application entry successfully updated!");
+                closeEditModal();
+                loadDatabases();
+            }
+        }
+
+        async function updateAppStatus(id, newStatus) {
+            const { error } = await supabaseClient.from('app_compatibility')
+                .update({ status: newStatus })
+                .eq('id', id);
+
+            if (error) {
+                alert("Error updating status: " + error.message);
+            } else {
+                loadDatabases();
+            }
+        }
+
+        async function deleteApp(id) {
+            if (!confirm("Are you sure you want to delete this application entry from the database?")) return;
+
+            const { error } = await supabaseClient.from('app_compatibility')
+                .delete()
+                .eq('id', id);
+
+            if (error) {
+                alert("Error deleting app: " + error.message);
+            } else {
+                loadDatabases();
+            }
+        }
+    </script>
+</body>
+</html>
