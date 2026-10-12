@@ -105,7 +105,7 @@
                         <i class="fa-solid fa-mobile-screen"></i>
                     </div>
                     <div>
-                        <h1 class="font-bold text-lg leading-none tracking-tight drop-shadow">PYiOS <span class="text-xs font-normal text-slate-200">v1.0.1</span></h1>
+                        <h1 class="font-bold text-lg leading-none tracking-tight drop-shadow">PYiOS <span class="version-display text-xs font-normal text-slate-200">v1.0.1</span></h1>
                         <span class="text-xs text-slate-200">iOS Emulator</span>
                     </div>
                 </div>
@@ -145,7 +145,7 @@
             <section class="ios-card p-5 sm:p-10 text-center relative overflow-hidden">
                 <div class="inline-flex items-center space-x-2 bg-blue-50 border border-blue-200 text-blue-700 text-xs px-3 py-1 rounded-full font-medium mb-4">
                     <span class="w-2 h-2 rounded-full bg-blue-600"></span>
-                    <span>PYiOS v1.0.1 Released</span>
+                    <span id="hero-release-badge">PYiOS v1.0.1 Released</span>
                 </div>
 
                 <h2 class="text-2xl sm:text-4xl font-extrabold text-slate-900 tracking-tight mb-3">
@@ -156,9 +156,9 @@
                 </p>
 
                 <div class="flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4">
-                    <a href="https://github.com/iustinian2013/PYiOS/releases/tag/v1.0.1" target="_blank" rel="noopener" class="w-full sm:w-auto px-6 py-3 rounded-lg text-sm font-bold text-white btn-glossy-blue flex items-center justify-center space-x-2">
+                    <a id="download-btn-link" href="https://github.com/iustinian2013/PYiOS/releases/latest" target="_blank" rel="noopener" class="github-download-link w-full sm:w-auto px-6 py-3 rounded-lg text-sm font-bold text-white btn-glossy-blue flex items-center justify-center space-x-2">
                         <i class="fa-solid fa-download"></i>
-                        <span>Download v1.0.1</span>
+                        <span class="download-text">Download Latest Release</span>
                     </a>
                     <button onclick="switchTab('database')" class="w-full sm:w-auto px-6 py-3 rounded-lg text-sm font-bold btn-glossy-silver flex items-center justify-center space-x-2">
                         <i class="fa-solid fa-list-check text-slate-600"></i>
@@ -501,7 +501,7 @@
         </div>
     </div>
 
-    <!-- Full, Un-shortened Client Logic -->
+    <!-- Complete Client Script Logic with Automatic GitHub Release Checker -->
     <script>
         const SUPABASE_URL = 'https://dkvsbywlcqxdqksmclhx.supabase.co';
         const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_afsugvjUbqI90eFzSYzywQ_qFC3np6T';
@@ -526,7 +526,41 @@
             loadAnnouncements();
             loadBugReports();
             loadCompatibilityNotice();
+            checkLatestGitHubRelease();
         };
+
+        // Automatically fetch latest release from GitHub API
+        async function checkLatestGitHubRelease() {
+            try {
+                const res = await fetch('https://api.github.com/repos/iustinian2013/PYiOS/releases/latest');
+                if (!res.ok) return;
+                const release = await res.json();
+                const tagName = release.tag_name; // e.g. "v1.0.2"
+                const releaseUrl = release.html_url;
+
+                // Update version text elements across the page
+                document.querySelectorAll('.version-display').forEach(el => {
+                    el.innerText = tagName;
+                });
+
+                // Update Hero badge
+                const heroBadge = document.getElementById('hero-release-badge');
+                if (heroBadge) {
+                    heroBadge.innerText = `PYiOS ${tagName} Released`;
+                }
+
+                // Update download link URL and text
+                document.querySelectorAll('.github-download-link').forEach(el => {
+                    el.href = releaseUrl;
+                    const textSpan = el.querySelector('.download-text');
+                    if (textSpan) {
+                        textSpan.innerText = `Download ${tagName}`;
+                    }
+                });
+            } catch (e) {
+                console.warn("Could not check latest GitHub release:", e);
+            }
+        }
 
         function switchTab(tabId) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
