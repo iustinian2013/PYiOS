@@ -13,9 +13,12 @@ import re
 import time
 
 import numpy as np
+from collections import deque
 
 from animations import AnimationBridge
 from openal import OpenALEmulator
+from libc import LibC
+from gles import GLES
 from cgbi_png import is_cgbi_png, decode_cgbi_png
 from nib_loader import NibDocument, NibView, find_nib, UIKitRenderer, hit_test
 
@@ -91,13 +94,14 @@ class ARMCpuCore:
         # ivar layout; we just hand out fixed-size zeroed blocks whose first
         # word is the isa pointer, which is all msgSend dispatch needs.
         self.heap_base = 0x70000000
-        self.heap_size = 0x100000
+        self.heap_size = 0x800000       # 8 MB (to 0x70800000): strings/paths each burn several 256-byte slots
         self.heap_next = self.heap_base
         self.uc.mem_map(self.heap_base, self.heap_size, uc.UC_PROT_ALL)
         self.instance_isa = {}  # object_addr -> class_addr
         self.view_hierarchy = []      # views the app passed to addSubview:
         self._uikit_objects = {}      # (receiver, selector) -> synthetic object
         self._uiapp_stage = 0         # UIApplicationMain lifecycle: 0=start, 1=post-init, 2=done
+        self._nib_init_queue = []     # (guest obj, IMP) of -initWithCoder: to run before the launch method
         self._delegate_class = None
         self._delegate_launch_sel = None
         self._delegate_obj = None
@@ -135,11 +139,15 @@ class ARMCpuCore:
         self.anim_bridge = AnimationBridge(self)   # UIView animation blocks + CABasicAnimation (animations.py)
         self.anim = self.anim_bridge.engine        # tweens view.frame / alpha / transform into view.pres
         self.fonts = {}                     # UIFont obj -> point size
+        self._gl_counts = {}
+        self._stub_history = deque(maxlen=24)   # last API stub calls (debug builds): for crash reports
         self._cb_pending = None             # on_return callback of the guest call currently running
         self.index_paths = {}               # NSIndexPath obj -> (section, row)
         self.table_styles = {}              # UITableViewController obj -> UITableViewStyle
         self._cell_labels = {}              # (cell obj, 'textLabel'|'detailTextLabel') -> label obj
         self.openal = OpenALEmulator(self)  # OpenAL + AudioFile (the app's looping sound engine)
+        self.libc = LibC(self)              # C library: strings, stdio, files, printf, ctype, threads stand-ins
+        self.gles = GLES(self)              # OpenGL ES 1.1 -> desktop GL
         self._drawing_view = 0
         self._touch_active = False
         self._touch_phase = 0
@@ -148,10 +156,13 @@ class ARMCpuCore:
 
         # --- minimal C runtime (malloc etc.) + unimplemented-symbol tracking ---
         self.cmalloc_base = 0x75000000
-        self.cmalloc_size = 0x1000000
+        self.cmalloc_size = 0x6000000        # 96 MB: games allocate their zone/heap up front, free() is a no-op
         self.cmalloc_next = self.cmalloc_base
         self.uc.mem_map(self.cmalloc_base, self.cmalloc_size, uc.UC_PROT_ALL)
         self.unimplemented_symbols = {}   # stub index -> symbol name (filled by the Mach-O loader)
+        self.init_funcs = []              # __mod_init_func entries, run before the entry point
+        self._init_queue = []
+        self._init_entry = 0
         self._warned_unimplemented = set()
         self.app_resource_dir = None   # set by main.py once the app bundle path is known
         self._resource_index = None    # lazy: {lowercase filename: full path}, whole bundle tree
@@ -172,7 +183,10 @@ class ARMCpuCore:
         self._trace = None             # EMU_TRACE=1 -> every framework message goes to trace.log
         self._unhandled_seen = set()   # (class, selector) pairs already reported by _log_unhandled
         
-        self.uc.hook_add(uc.UC_HOOK_CODE, self._hook_code_execution)
+        # Only the API stub region needs the Python callback. Hooking every guest instruction (no begin/end)
+        # made all emulated code - BMP decoding, memcpy loops, game logic - run at Python-callback speed.
+        self.uc.hook_add(uc.UC_HOOK_CODE, self._hook_code_execution, None,
+                         self.stub_base, self.stub_base + 0x20000 - 1)
         self.uc.hook_add(uc.UC_HOOK_INTR, self._hook_interrupt)
         self.uc.hook_add(
             uc.UC_HOOK_MEM_READ_UNMAPPED | 
@@ -205,6 +219,14 @@ class ARMCpuCore:
         actual_sp = stack_pointer - len(stack_data) - 0x100
         self.uc.mem_write(actual_sp, stack_data)
 
+        # Enable the VFP/NEON unit (CPACR cp10/cp11 full access + FPEXC.EN). Without this every inline floating
+        # point instruction (vcvt, vmov, vadd...) raises UC_ERR_INSN_INVALID - which is what stopped Doom at launch.
+        try:
+            self.uc.reg_write(arm_const.UC_ARM_REG_C1_C0_2, self.uc.reg_read(arm_const.UC_ARM_REG_C1_C0_2) | (0xF << 20))
+            self.uc.reg_write(arm_const.UC_ARM_REG_FPEXC, 0x40000000)
+        except Exception as e:
+            logging.warning(f"[ARM Core] could not enable VFP: {e}")
+
         cpsr = self.uc.reg_read(arm_const.UC_ARM_REG_CPSR)
         
         if (entry_point & 1) or self._is_thumb(entry_point):
@@ -222,6 +244,33 @@ class ARMCpuCore:
             self.uc.reg_write(reg, 0)
             
         logging.info(f"[ARM Core] Registers configured -> PC: 0x{entry_point & ~1:08X}, SP: 0x{actual_sp:08X}, Thumb: {bool(cpsr & (1 << 5))}")
+        if self.init_funcs:
+            self._init_queue = list(self.init_funcs)
+            self._init_entry = entry_point
+            self._run_next_initializer(self.uc)
+            logging.info(f"[ARM Core] running {len(self.init_funcs)} static initializer(s) before the entry point")
+
+    INIT_RETURN_STUB = 99
+
+    def _set_pc_mode(self, uc_engine, addr):
+        cpsr = uc_engine.reg_read(arm_const.UC_ARM_REG_CPSR)
+        cpsr = (cpsr | (1 << 5)) if (addr & 1) else (cpsr & ~(1 << 5))
+        uc_engine.reg_write(arm_const.UC_ARM_REG_CPSR, cpsr)
+        uc_engine.reg_write(arm_const.UC_ARM_REG_PC, addr & ~1)
+
+    def _run_next_initializer(self, uc_engine):
+        """dyld runs every __mod_init_func entry (C++ static constructors) before main(); chain them via a return stub."""
+        for reg in (arm_const.UC_ARM_REG_R0, arm_const.UC_ARM_REG_R1, arm_const.UC_ARM_REG_R2, arm_const.UC_ARM_REG_R3):
+            uc_engine.reg_write(reg, 0)
+        if self._init_queue:
+            fn = self._init_queue.pop(0)
+            logging.info(f"[Init] running static initializer 0x{fn:08X}")
+            uc_engine.reg_write(arm_const.UC_ARM_REG_LR, self.stub_base + self.INIT_RETURN_STUB * 4)
+            self._set_pc_mode(uc_engine, fn)
+        else:
+            logging.info("[Init] static initializers done - entering the app entry point")
+            uc_engine.reg_write(arm_const.UC_ARM_REG_LR, 0)
+            self._set_pc_mode(uc_engine, self._init_entry)
 
     def install_objc_runtime(self, classes_by_addr, classes_by_name):
         self.classes_by_addr = classes_by_addr
@@ -657,6 +706,114 @@ class ARMCpuCore:
         self.nib_roots.extend(doc.roots)
         return doc
 
+    def _queue_nib_init_with_coder(self):
+        """
+        Real nib loading sends -initWithCoder: to every object it instantiates; this emulator builds the
+        objects itself, so app code living in -initWithCoder: (EAGLView's creates the CAppContainer behind the
+        global mContainer, the GL context, the audio session) never ran: -drawView then called into a NULL
+        container and crashed. Queue -initWithCoder: for every nib-reachable object whose own (app-defined)
+        class implements it; UIApplicationMain runs them before the launch method.
+        """
+        from objc_runtime import resolve_method
+        self._nib_init_queue = []
+        seen = set()
+
+        def consider(obj):
+            if not obj or obj in seen:
+                return
+            seen.add(obj)
+            cls = self._class_of(obj)
+            if not cls or cls not in self.classes_by_addr:
+                return
+            imp = self.classes_by_addr[cls]['methods'].get('initWithCoder:')
+            if imp:
+                self._nib_init_queue.append((obj, imp))
+                logging.info(f"[NIB] will send -[{self.classes_by_addr[cls]['name']} initWithCoder:] to 0x{obj:08X}")
+
+        def walk(v):
+            consider(getattr(v, 'guest', 0))
+            for ch in getattr(v, 'children', []) or []:
+                walk(ch)
+
+        for root in getattr(self, 'nib_roots', []) or []:
+            walk(root)
+        if not self._nib_delegate:
+            logging.info(f"[NIB] initWithCoder: queue has {len(self._nib_init_queue)} entr(ies)")
+            return
+        guest, class_addr, _sel = self._nib_delegate
+        seen.add(guest)
+        chain, cur, hops = [], class_addr, 0
+        while cur and cur in self.classes_by_addr and hops < 8:
+            chain.append(cur)
+            cur = self.classes_by_addr[cur]['super']
+            hops += 1
+        for c in chain:
+            for name, off in self.classes_by_addr[c].get('ivars', {}).items():
+                try:
+                    obj = struct.unpack('<I', bytes(self.uc.mem_read(guest + off, 4)))[0]
+                except Exception:
+                    continue
+                consider(obj)
+        logging.info(f"[NIB] initWithCoder: queue has {len(self._nib_init_queue)} entr(ies)")
+
+    def _synthesize_nil_outlets(self):
+        """
+        Real nibs sometimes instantiate a controller (e.g. GameViewController) that the nib walk here
+        never turns into a guest object, leaving the delegate's matching ivar nil: the app then sends
+        -view / -SetGameView: to nil, its game state is never initialised and it crashes on the first
+        frame (modulo by zero -> garbage pointer). For every zero ivar on the nib delegate that has no
+        outlet, find a local class named like the ivar (viewController -> GameViewController), allocate
+        an instance, store it, and make its -view answer with the nib's main content view.
+        """
+        if not self._nib_delegate:
+            return
+        guest, class_addr, _sel = self._nib_delegate
+        chain, cur, hops = [], class_addr, 0
+        while cur and cur in self.classes_by_addr and hops < 8:
+            chain.append(cur)
+            cur = self.classes_by_addr[cur]['super']
+            hops += 1
+        ivars = {}
+        for c in chain:
+            for name, off in self.classes_by_addr[c].get('ivars', {}).items():
+                ivars.setdefault(name, off)
+
+        def read(off):
+            return struct.unpack('<I', bytes(self.uc.mem_read(guest + off, 4)))[0]
+
+        content = 0
+        for name in ('glView', 'view', 'contentView'):
+            if name in ivars and read(ivars[name]):
+                content = read(ivars[name])
+                break
+        if not content:
+            for root in self.nib_roots:
+                if root.class_name != 'UIWindow' and getattr(root, 'guest', 0):
+                    content = root.guest
+                    break
+
+        local = {n: a for n, a in self.classes_by_name.items()
+                 if self.classes_by_addr.get(a, {}).get('methods') and a != class_addr}
+        for name, off in ivars.items():
+            if read(off):
+                continue
+            key = name.lstrip('_').lower()
+            if not key.endswith('controller') and key not in ('viewcontroller',):
+                continue
+            match = None
+            for cname, caddr in local.items():
+                if cname.lower() == key or (cname.lower().endswith(key) and 'controller' in cname.lower()):
+                    match = (cname, caddr)
+                    break
+            if not match:
+                continue
+            obj = self.objc_alloc(match[1])
+            self.uc.mem_write(guest + off, struct.pack('<I', obj))
+            if content:
+                self.vc_views[obj] = content
+            logging.info(f"[NIB] outlet {self.classes_by_addr[class_addr]['name']}.{name} was nil: "
+                         f"instantiated {match[0]} = 0x{obj:08X} (view = 0x{content:08X})")
+
     def load_app_nibs(self):
         """Real UIApplicationMain loads NSMainNibFile from Info.plist before launching the delegate."""
         from objc_runtime import resolve_method
@@ -706,6 +863,16 @@ class ARMCpuCore:
                     for sel in ("viewWillAppear:", "viewDidAppear:"):
                         if resolve_method(self.classes_by_addr, class_addr, sel):
                             self._action_queue.append({'target': guest, 'sel': sel, 'arg2': 0})
+
+        self._synthesize_nil_outlets()
+        self._queue_nib_init_with_coder()
+
+        # UIApplicationMain makes the nib's main window visible at launch (apps like Doom never call
+        # makeKeyAndVisible themselves); a hidden window would swallow every touch and never be drawn.
+        for root in self.nib_roots:
+            if root.class_name == 'UIWindow' and root.hidden:
+                root.hidden = False
+                logging.info("[UIKit] main window made visible at launch")
 
         if self._nib_delegate:
             guest, class_addr, _sel = self._nib_delegate
@@ -916,6 +1083,9 @@ class ARMCpuCore:
         'integerValue', 'floatValue', 'doubleValue', 'boolValue', 'isEqualToString:', 'stringByAppendingString:',
         'stringByAppendingPathComponent:', 'lastPathComponent', 'pathExtension', 'stringByDeletingPathExtension',
         'stringByDeletingLastPathComponent', 'hasPrefix:', 'hasSuffix:',
+        'stringByStandardizingPath', 'stringByExpandingTildeInPath', 'stringByResolvingSymlinksInPath',
+        'stringByAbbreviatingWithTildeInPath', 'description', 'lowercaseString', 'uppercaseString',
+        'stringByAppendingPathExtension:', 'isAbsolutePath',
     })
     _FMT_RE = re.compile(r'%([-+ 0#]*)(\d+)?(?:\.(\d+))?(hh|h|ll|l|z|t|q)?([diouxXfFeEgGcs@%])')
 
@@ -1339,6 +1509,58 @@ class ARMCpuCore:
             uc_engine.reg_write(R0, obj)
             return True
 
+        # ---------------- UIDevice / EAGLContext ----------------
+        if is_class and cls_name == 'UIDevice' and sel_name == 'currentDevice':
+            if not self.__dict__.get('_device_obj'):
+                self._device_obj = self.objc_alloc(receiver)
+            uc_engine.reg_write(R0, self._device_obj)
+            return True
+        if self.__dict__.get('_device_obj') and receiver == self._device_obj:
+            strings = {'model': 'iPhone', 'localizedModel': 'iPhone', 'name': 'iPhone', 'systemName': 'iPhone OS',
+                       'systemVersion': '2.0', 'uniqueIdentifier': '0000000000000000000000000000000000000000'}
+            if sel_name in strings:
+                uc_engine.reg_write(R0, self._new_string(strings[sel_name]))
+                return True
+            if sel_name in ('orientation', 'userInterfaceIdiom'):
+                uc_engine.reg_write(R0, 1 if sel_name == 'orientation' else 0)      # portrait / phone
+                return True
+            if sel_name in ('beginGeneratingDeviceOrientationNotifications', 'endGeneratingDeviceOrientationNotifications'):
+                return True
+        if not is_class and cls_name == 'EAGLContext':
+            if sel_name == 'presentRenderbuffer:':
+                self._log_gl_frame()
+                gpu = getattr(self, 'gpu', None)
+                if gpu is not None:
+                    gpu.eagl_present_renderbuffer()
+                uc_engine.reg_write(R0, 1)
+                return True
+            if sel_name in ('renderbufferStorage:fromDrawable:', 'setMultiThreaded:'):
+                uc_engine.reg_write(R0, 1)
+                return True
+            if sel_name == 'initWithAPI:' or sel_name == 'initWithAPI:sharegroup:':
+                uc_engine.reg_write(R0, receiver)
+                return True
+        if is_class and cls_name == 'EAGLContext' and sel_name == 'setCurrentContext:':
+            uc_engine.reg_write(R0, 1)
+            return True
+
+        # ---------------- NSThread ----------------
+        if is_class and cls_name == 'NSThread':
+            if sel_name == 'threadPriority':
+                self._ret_double(uc_engine, 0.5)
+                return True
+            if sel_name == 'setThreadPriority:':
+                uc_engine.reg_write(R0, 1)
+                return True
+            if sel_name in ('currentThread', 'mainThread'):
+                uc_engine.reg_write(R0, receiver)
+                return True
+            if sel_name in ('isMainThread', 'isMultiThreaded'):
+                uc_engine.reg_write(R0, 1)
+                return True
+            if sel_name == 'sleepForTimeInterval:':
+                return True
+
         # ---------------- NSString ----------------
         if is_class and cls_name in ('NSString', 'NSMutableString'):
             text = None
@@ -1353,6 +1575,32 @@ class ARMCpuCore:
             if text is not None:
                 uc_engine.reg_write(R0, self._new_string(text))
                 return True
+        if sel_name == 'getCString:maxLength:encoding:' and (receiver in self.strings or self._nsstring_at(receiver) is not None):
+            (_enc,) = self._stack_words(uc_engine, sp, 1)
+            txt = (self.strings.get(receiver) or self._nsstring_at(receiver) or '').encode('utf-8')
+            if r3 and len(txt) + 1 <= r3 and r2:
+                uc_engine.mem_write(r2, txt + b'\x00')
+                uc_engine.reg_write(R0, 1)
+            else:
+                uc_engine.reg_write(R0, 0)
+            return True
+        if not is_class and cls_name in ('NSString', 'NSMutableString') and sel_name in (
+                'init', 'initWithUTF8String:', 'initWithCString:', 'initWithCString:encoding:', 'initWithString:',
+                'initWithFormat:', 'initWithCapacity:'):
+            if sel_name == 'initWithFormat:':
+                init_text = self._format_string(uc_engine, self._str_of(r2) or '')
+            elif sel_name in ('initWithUTF8String:', 'initWithCString:', 'initWithCString:encoding:'):
+                init_text = self._cstring_at(r2, 1024) or ''
+            elif sel_name == 'initWithString:':
+                init_text = self._str_of(r2) or ''
+            else:
+                init_text = ''
+            self.strings[receiver] = init_text
+            uc_engine.reg_write(R0, receiver)
+            return True
+        if is_class and cls_name in ('NSString', 'NSMutableString') and sel_name == 'stringWithCString:encoding:':
+            uc_engine.reg_write(R0, self._new_string(self._cstring_at(r2, 1024) or ''))
+            return True
         text = self.strings.get(receiver)
         if text is None and sel_name in self._STRING_SELECTORS and not is_class and receiver not in self.instance_isa \
                 and receiver not in self.guest_views:
@@ -1381,6 +1629,17 @@ class ARMCpuCore:
                 uc_engine.reg_write(R0, self._new_string(text + (self._str_of(r2) or '')))
             elif sel_name == 'stringByAppendingPathComponent:':
                 uc_engine.reg_write(R0, self._new_string(text.rstrip('/') + '/' + (self._str_of(r2) or '')))
+            elif sel_name in ('stringByStandardizingPath', 'stringByExpandingTildeInPath',
+                              'stringByResolvingSymlinksInPath', 'stringByAbbreviatingWithTildeInPath', 'description'):
+                uc_engine.reg_write(R0, receiver if receiver in self.strings else self._new_string(text))
+            elif sel_name == 'lowercaseString':
+                uc_engine.reg_write(R0, self._new_string(text.lower()))
+            elif sel_name == 'uppercaseString':
+                uc_engine.reg_write(R0, self._new_string(text.upper()))
+            elif sel_name == 'stringByAppendingPathExtension:':
+                uc_engine.reg_write(R0, self._new_string(text + '.' + (self._str_of(r2) or '')))
+            elif sel_name == 'isAbsolutePath':
+                uc_engine.reg_write(R0, 1 if text.startswith('/') or (len(text) > 1 and text[1] == ':') else 0)
             elif sel_name == 'lastPathComponent':
                 uc_engine.reg_write(R0, self._new_string(text.rstrip('/').rsplit('/', 1)[-1]))
             elif sel_name == 'pathExtension':
@@ -1529,21 +1788,13 @@ class ARMCpuCore:
         return dump_tree(self.nib_roots)
 
     def _trace_msg(self, uc_engine, receiver, class_addr, sel_name, result, r2, r3):
-        if self._trace is None:
-            try:
-                self._trace = open('trace.log', 'w', buffering=1, encoding='utf-8')
-                logging.info("[Trace] EMU_TRACE=1: framework messages -> trace.log")
-            except Exception:
-                self._trace = False
-        if not self._trace:
-            return
         info = self.classes_by_addr.get(class_addr) if class_addr else None
         kind = '+' if receiver in self.classes_by_addr else '-'
         r0 = uc_engine.reg_read(arm_const.UC_ARM_REG_R0)
         text = self.strings.get(r2) if r2 in self.strings else None
-        self._trace.write(f"{time.monotonic():10.3f} {kind}[{info['name'] if info else '?'} {sel_name}] "
-                          f"recv=0x{receiver:08X} r2=0x{r2:08X}{'(' + repr(text) + ')' if text else ''} r3=0x{r3:08X} "
-                          f"-> {result} r0=0x{r0:08X}\n")
+        logging.debug(f"[Trace] {kind}[{info['name'] if info else '?'} {sel_name}] "
+                      f"recv=0x{receiver:08X} r2=0x{r2:08X}{'(' + repr(text) + ')' if text else ''} r3=0x{r3:08X} "
+                      f"-> {result} r0=0x{r0:08X}")
 
     def _log_unhandled(self, receiver, class_addr, sel_name):
         """Report every framework selector nothing implements (once each) - it silently returns the receiver."""
@@ -1565,7 +1816,8 @@ class ARMCpuCore:
               'atan': math.atan, 'sinh': math.sinh, 'cosh': math.cosh, 'tanh': math.tanh, 'sqrt': math.sqrt,
               'exp': math.exp, 'log': math.log, 'log10': math.log10, 'log2': math.log2, 'floor': math.floor,
               'ceil': math.ceil, 'fabs': math.fabs, 'trunc': math.trunc,
-              'round': lambda v: math.floor(v + 0.5) if v >= 0 else -math.floor(-v + 0.5)}
+              'round': lambda v: math.floor(v + 0.5) if v >= 0 else -math.floor(-v + 0.5),
+              'rint': lambda v: float(round(v))}
     _LIBM2 = {'atan2': math.atan2, 'pow': math.pow, 'fmod': math.fmod, 'fmax': max, 'fmin': min, 'hypot': math.hypot}
 
     def _math_stub(self, uc_engine, name):
@@ -2391,9 +2643,57 @@ class ARMCpuCore:
             stub_index = (address - self.stub_base) // 4
             self.handle_api_stub(uc_engine, stub_index)
 
+    def crash_report(self, uc_engine=None, header="crash"):
+        """Everything needed to see why guest code went off the rails: registers, stack, the last API calls and the
+        machine code around the last call site. Printed once or twice, in debug builds only."""
+        uc_engine = uc_engine or self.uc
+        names = [f'r{i}' for i in range(13)] + ['sp', 'lr', 'pc']
+        regs = {n: uc_engine.reg_read(getattr(arm_const, f'UC_ARM_REG_{n.upper()}')) for n in names}
+        out = [f"[Crash] {header}: " + ' '.join(f"{n}={v:08X}" for n, v in regs.items())]
+        try:
+            words = struct.unpack('<32I', bytes(uc_engine.mem_read(regs['sp'], 128)))
+            out.append("[Crash] stack: " + ' '.join(f"{w:08X}" for w in words))
+        except Exception:
+            pass
+        last_site = 0
+        for idx, name, a0, a1, a2, a3, lr in list(self._stub_history)[-14:]:
+            out.append(f"[Crash] api #{idx} {name or ''} args=({a0:08X},{a1:08X},{a2:08X},{a3:08X}) called from 0x{lr:08X}")
+            last_site = lr
+        if last_site:
+            for start, length in (((last_site & ~1) - 96, 160), (last_site & ~1, 64)):
+                try:
+                    out.append(f"[Crash] code @0x{start:08X}: " + bytes(uc_engine.mem_read(start, length)).hex())
+                    break
+                except Exception:
+                    continue
+        return '\n'.join(out)
+
+    _GL_BOUND_NAMES = {0: '_glClearColor', 1: '_glClear', 2: '_glDrawArrays', 3: '_glDrawElements',
+                       4: '_glBindTexture', 5: '_glGenTextures', 6: '_glTexImage2D', 7: '_glTexParameteri',
+                       8: '_glEnable', 9: '_glDisable', 10: '_glViewport'}
+
+    def _log_gl_frame(self):
+        self._gl_present_count = getattr(self, '_gl_present_count', 0) + 1
+        n = self._gl_present_count
+        if n <= 8 or n % 120 == 0:
+            counts = ', '.join(f"{k.lstrip('_')}x{v}" for k, v in sorted(self._gl_counts.items())) or 'no GL calls'
+            logging.info(f"[GL] present #{n}: {counts} | draw_flag={getattr(self.gpu, 'active_draw_flag', None)}")
+        self._gl_counts = {}
+
     def handle_api_stub(self, uc_engine, index):
+        if index == self.INIT_RETURN_STUB:
+            self._run_next_initializer(uc_engine)
+            return
         lr = uc_engine.reg_read(arm_const.UC_ARM_REG_LR)
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            self._stub_history.append((index, self.unimplemented_symbols.get(index, ''),
+                                       *(uc_engine.reg_read(r) for r in (arm_const.UC_ARM_REG_R0, arm_const.UC_ARM_REG_R1,
+                                                                          arm_const.UC_ARM_REG_R2, arm_const.UC_ARM_REG_R3)), lr))
         
+        _gl_name = self._GL_BOUND_NAMES.get(index) or self.unimplemented_symbols.get(index, '')
+        if _gl_name.startswith('_gl') or _gl_name.startswith('gl'):
+            self._gl_counts[_gl_name] = self._gl_counts.get(_gl_name, 0) + 1
+
         if index == 0: # _glClearColor
             try:
                 r0 = uc_engine.reg_read(arm_const.UC_ARM_REG_R0)
@@ -2416,20 +2716,19 @@ class ARMCpuCore:
                 self.gpu.gl_clear(mask)
                 
         elif index == 2: # _glDrawArrays
-            mode = uc_engine.reg_read(arm_const.UC_ARM_REG_R0)
-            first = uc_engine.reg_read(arm_const.UC_ARM_REG_R1)
-            count = uc_engine.reg_read(arm_const.UC_ARM_REG_R2)
-            if self.gpu:
-                self.gpu.gl_draw_arrays(mode, first, count)
-                
+            if self.gpu and self.gpu.initialized:
+                self.gles.handle(uc_engine, '_glDrawArrays')
+                self.gpu.active_draw_flag = True
+
         elif index == 3: # _glDrawElements
-            mode = uc_engine.reg_read(arm_const.UC_ARM_REG_R0)
-            count = uc_engine.reg_read(arm_const.UC_ARM_REG_R1)
-            dtype = uc_engine.reg_read(arm_const.UC_ARM_REG_R2)
-            indices = uc_engine.reg_read(arm_const.UC_ARM_REG_R3)
-            if self.gpu:
-                self.gpu.gl_draw_elements(mode, count, dtype, indices)
-                
+            if self.gpu and self.gpu.initialized:
+                self.gles.handle(uc_engine, '_glDrawElements')
+                self.gpu.active_draw_flag = True
+
+        elif index in (6, 7, 8, 9, 10): # _glTexImage2D, _glTexParameteri, _glEnable, _glDisable, _glViewport
+            if self.gpu and self.gpu.initialized:
+                self.gles.handle(uc_engine, ('_glTexImage2D', '_glTexParameteri', '_glEnable', '_glDisable', '_glViewport')[index - 6])
+
         elif index == 4: # _glBindTexture
             target = uc_engine.reg_read(arm_const.UC_ARM_REG_R0)
             texture = uc_engine.reg_read(arm_const.UC_ARM_REG_R1)
@@ -2440,8 +2739,11 @@ class ARMCpuCore:
             n = uc_engine.reg_read(arm_const.UC_ARM_REG_R0)
             textures_ptr = uc_engine.reg_read(arm_const.UC_ARM_REG_R1)
             if self.gpu and textures_ptr:
-                tex_id = self.gpu.gl_gen_textures(1)
-                uc_engine.mem_write(textures_ptr, struct.pack('<I', tex_id))
+                ids = []
+                for _i in range(max(1, min(n, 256))):
+                    t = self.gpu.gl_gen_textures(1)
+                    ids.append(int(t[0]) if hasattr(t, '__len__') else int(t))
+                uc_engine.mem_write(textures_ptr, b''.join(struct.pack('<I', i) for i in ids))
                 
         elif index == 11: # _objc_msgSend
             receiver = uc_engine.reg_read(arm_const.UC_ARM_REG_R0)
@@ -2526,6 +2828,16 @@ class ARMCpuCore:
                     logging.warning("[UIApplicationMain] No app delegate found in class metadata; parking.")
                     stage = 2
                     self._uiapp_stage = 2
+
+            if stage == 1 and self._nib_init_queue:
+                obj, imp = self._nib_init_queue.pop(0)
+                logging.info(f"[UIApplicationMain] running -initWithCoder: on 0x{obj:08X} -> IMP 0x{imp:08X}")
+                uc_engine.reg_write(arm_const.UC_ARM_REG_R0, obj)
+                uc_engine.reg_write(arm_const.UC_ARM_REG_R1, 0)
+                uc_engine.reg_write(arm_const.UC_ARM_REG_R2, 0)
+                uc_engine.reg_write(arm_const.UC_ARM_REG_LR, self.stub_base + (15 * 4))
+                uc_engine.reg_write(arm_const.UC_ARM_REG_PC, imp)
+                return
 
             if stage == 1:
                 self._uiapp_stage = 2
@@ -2953,6 +3265,12 @@ class ARMCpuCore:
 
         elif index in self.unimplemented_symbols and self.openal.handle(uc_engine, self.unimplemented_symbols[index]):
             pass            # OpenAL / AudioFile / SjLj unwind registration: emulated by name
+
+        elif index in self.unimplemented_symbols and self.libc.handle(uc_engine, self.unimplemented_symbols[index]):
+            pass            # C library (strings, stdio, POSIX files, printf, ctype, 64-bit division...)
+
+        elif index in self.unimplemented_symbols and self.gles.handle(uc_engine, self.unimplemented_symbols[index]):
+            pass            # OpenGL ES 1.1 / OES framebuffer entry points
 
         elif index in self.unimplemented_symbols and self._math_stub(uc_engine, self.unimplemented_symbols[index]):
             pass            # soft-float helpers / libm: emulated by name, result already in r0 (r0:r1 for doubles)
