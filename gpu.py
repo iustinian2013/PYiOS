@@ -36,6 +36,7 @@ class PowerVRGPU:
         self.texture_cache = {}
         
         self.frame_count = 0
+        self.gl_app = False      # set once the app itself issues GL draw calls
         self.context_active = False
         self.active_draw_flag = False
 
@@ -271,6 +272,9 @@ class PowerVRGPU:
             # own. Without clearing here first, the two physical buffers of
             # the double-buffered swap chain drift out of sync with each
             # other over time, which is what was causing the flicker.
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+            if self.active_draw_flag:
+                self.gl_app = True
+            if not self.gl_app:                  # UIKit/CoreGraphics apps: start every tick from a clean buffer
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             if self.active_draw_flag:
                 self.eagl_present_renderbuffer()
