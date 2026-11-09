@@ -19,6 +19,7 @@ from audio import IOSAudioEngine
 from touch import TouchInput
 from homescreen import IOSHomeScreen
 from bridge import IOSRuntimeBridge
+from libc import rune_locale_bytes, STDOUT, STDERR, STDIN, RUNE_LOCALE_ADDR, STD_VARS_ADDR
 from coregraphics import QuartzContext
 from objc_runtime import parse_classes, bind_class_refs
 
@@ -26,6 +27,14 @@ os.environ["UC_IGNORE_REG_BREAK"] = "1"
 faulthandler.enable()   # a real native crash (Unicorn/SDL/GL) prints a Python traceback instead of exiting silently
 
 # Quiet console by default. For development only: EMU_DEBUG=1 prints the emulator log, EMU_DEBUG=2 adds the full trace.
+# Drop a file called debug.py next to main.py (or in the folder you launch from) to switch everything on:
+# full DEBUG log, the per-message trace and the tilt-pipeline watch - all on the console, nothing is written to disk.
+# Delete it for a silent release build.
+_here = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+if any(os.path.isfile(os.path.join(d, "debug.py")) for d in (_here, os.getcwd())):
+    os.environ["EMU_DEBUG"] = "2"
+    os.environ.setdefault("EMU_TRACE", "1")
+    os.environ.setdefault("EMU_WATCH", "1")
 _dbg = os.environ.get("EMU_DEBUG", "")
 logging.basicConfig(
     level=logging.DEBUG if _dbg == "2" else (logging.INFO if _dbg else logging.ERROR),
@@ -34,9 +43,16 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
+_DIAG = {'cpu': None, 'reports': 0}      # debug builds: lets the fault hook print a crash report
+
+
 def setup_unmapped_memory_hook(uc_engine):
     def hook_mem_invalid(uc_engine, access, address, size, value, user_data):
         page_addr = address & ~0xFFF
+        if _DIAG['cpu'] is not None and _DIAG['reports'] < 3 and logging.getLogger().isEnabledFor(logging.DEBUG) \
+                and (access & uc.UC_MEM_FETCH_UNMAPPED):
+            _DIAG['reports'] += 1
+            logging.warning(_DIAG['cpu'].crash_report(uc_engine, f"jump to unmapped 0x{address:08X}"))
         try:
             uc_engine.mem_map(page_addr, 0x1000)
             
@@ -296,14 +312,18 @@ class RealMachoLoader:
 
             # Data symbols (not functions): give them real backing memory instead of
             # leaving the slot pointing at garbage.
-            memory_mgr.map_region(0x74000000, 0x1000)
+            memory_mgr.map_region(0x74000000, 0x4000)
             identity = struct.pack('<16f', 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1)
             memory_mgr.write_payload(0x74000100, identity)
             memory_mgr.write_payload(0x74000200, struct.pack('<6f', 1, 0, 0, 1, 0, 0))   # CGAffineTransformIdentity
+            memory_mgr.write_payload(RUNE_LOCALE_ADDR, rune_locale_bytes())                  # _DefaultRuneLocale (ctype)
+            memory_mgr.write_payload(STD_VARS_ADDR, struct.pack('<III', STDOUT, STDERR, STDIN))  # stdout/stderr/stdin FILE*
             data_symbol_map = {
                 "_CGRectZero": 0x74000000, "_CGPointZero": 0x74000000, "_CGSizeZero": 0x74000000,
                 "_kCFAllocatorDefault": 0x74000000, "_CATransform3DIdentity": 0x74000100,
                 "_CGAffineTransformIdentity": 0x74000200,
+                "__DefaultRuneLocale": RUNE_LOCALE_ADDR,
+                "___stdoutp": STD_VARS_ADDR, "___stderrp": STD_VARS_ADDR + 4, "___stdinp": STD_VARS_ADDR + 8,
             }
             cpu_core._next_unimplemented = getattr(cpu_core, '_next_unimplemented', 100)
 
@@ -356,6 +376,20 @@ class RealMachoLoader:
                                     cpu_core.unimplemented_symbols[idx] = sym_name
                                     memory_mgr.write_payload(target_slot_addr, struct.pack('<I', cpu_core.stub_base + idx * 4))
                                     logging.debug(f"[GOT Patch] {sym_name} at 0x{target_slot_addr:08X} -> unimplemented stub #{idx}")
+
+        cpu_core.init_funcs = []
+        for seg in segments:
+            for sect in seg['sections']:
+                if sect['name'] == '__mod_init_func':
+                    for i in range(sect['size'] // 4):
+                        off = sect['offset'] + i * 4
+                        if off + 4 <= len(data):
+                            fn = struct.unpack('<I', data[off:off + 4])[0]
+                            if fn:
+                                cpu_core.init_funcs.append(fn)
+        if cpu_core.init_funcs:
+            logging.info("[Loader] static initializers (__mod_init_func): " +
+                         ', '.join(f"0x{f:08X}" for f in cpu_core.init_funcs))
 
         if not entry_point or entry_point < 0x1000:
             entry_point = 0x00001000 + 0x100
@@ -423,7 +457,7 @@ class IOSEmulatorCoordinator:
         
         self.width, self.height = 320, 480
         self.window = pygame.display.set_mode((self.width * 2, self.height * 2))
-        pygame.display.set_caption("PYiOS - iOS Emulator")
+        pygame.display.set_caption("Raw ARMv7 iOS Binary Emulator [Debug Inspector]")
         
         self.clock = pygame.time.Clock()
         self._build_machine()
@@ -463,6 +497,8 @@ class IOSEmulatorCoordinator:
         self.bridge = IOSRuntimeBridge(None, self.gpu)
         self.cg = QuartzContext(self.width, self.height)
         self.cpu = ARMCpuCore(gpu_instance=self.gpu, bridge_instance=self.bridge, cg_instance=self.cg)
+        _DIAG['cpu'] = self.cpu
+        _DIAG['reports'] = 0
         self.memory = SystemMemory(self.cpu.uc)
         setup_unmapped_memory_hook(self.cpu.uc)
         self.touch = TouchInput(self.cpu, (self.width, self.height))
@@ -471,7 +507,7 @@ class IOSEmulatorCoordinator:
     def set_display_mode(self, mode_type):
         if mode_type == "HOME":
             self.window = pygame.display.set_mode((self.width * 2, self.height * 2))
-            pygame.display.set_caption("PYiOS - iOS Emulator")
+            pygame.display.set_caption("Raw ARMv7 iOS Binary Emulator [Debug Inspector]")
         elif mode_type == "APP":
             # GL attributes must be set BEFORE set_mode() creates the context -
             # SDL only reads them at context-creation time. Setting them
@@ -496,7 +532,7 @@ class IOSEmulatorCoordinator:
             app_title = launched_app.get('name', 'iOS App')
 
             self.set_display_mode("APP")
-            pygame.display.set_caption(f"{app_title}")
+            pygame.display.set_caption(f"{app_title} - Live Debugging")
 
             logging.info(f"[Runtime Debug] Booting sandbox for: {app_title} (Target: {binary_path})")
             
@@ -506,6 +542,8 @@ class IOSEmulatorCoordinator:
             self.bridge.uc = self.cpu.uc
 
             self.cpu.app_resource_dir = app_folder
+            if launched_app.get('path') and binary_path:
+                IOSHomeScreen.extract_bundle(launched_app['path'], binary_path)   # nibs, images, sounds, data files
             resolved_base, resolved_entry = RealMachoLoader.load(self.cpu, self.memory, binary_path, self.bridge)
             if resolved_base:
                 self.code_base = resolved_base
@@ -576,30 +614,60 @@ class IOSEmulatorCoordinator:
                         # One slice runs one queued guest call (a redraw, an accelerometer sample, a timer...).
                         # Running only one per frame capped the app at <= fps calls/s in total, which is why tilt
                         # felt sluggish: keep going while work is queued, within a small time budget.
+                        # A guest call that is still running (launch, resource loading, a game tick) is NOT parked at
+                        # the UIApplicationMain stub. Giving it only one 20000-instruction slice per frame capped
+                        # startup at ~1M instr/s - loading the game's data files took minutes. While the guest is
+                        # mid-call, keep running slices for most of the frame; when it parks, fall back to the
+                        # small budget so the window stays responsive.
+                        park_pc = self.cpu.stub_base + 15 * 4
                         budget_end = time.perf_counter() + 0.012
-                        for _slice in range(8):
+                        busy_end = time.perf_counter() + 0.030
+                        for _slice in range(400):
                             success = self.cpu.run_cpu_slice(self.cpu.uc.reg_read(uc.arm_const.UC_ARM_REG_PC), count=20000)
                             if not success:
                                 logging.warning(f"[Runtime CPU Warning] Slice execution halted or trapped at PC 0x{pc:08X}")
                                 break
-                            if not self.cpu.has_pending_work() or time.perf_counter() > budget_end:
+                            now_pc = self.cpu.uc.reg_read(uc.arm_const.UC_ARM_REG_PC) & ~1
+                            mid_call = now_pc != park_pc
+                            if mid_call:
+                                if time.perf_counter() > busy_end:
+                                    break
+                            elif not self.cpu.has_pending_work() or time.perf_counter() > budget_end:
                                 break
                     except uc.UcError as uc_err:
                         logging.error(f"[Unicorn Trap] Emulation exception at PC 0x{pc:08X}: {uc_err}", exc_info=True)
                         self.state = "HOME"
                         self.set_display_mode("HOME")
 
+                gl_idle = False
                 if self.state == "HOME":
                     self.window.fill((0, 0, 0))
                     self.homescreen.draw(self.window)
                 elif self.state == "APP":
-                    self.gpu.render_frame(self.window, active_app_name=(self.running_app['name'] if self.running_app else ""))
-                    frame = self.cpu.compose_frame(self.cg.get_surface())
-                    if frame is not self.cg.get_surface():
-                        self.touch.draw_overlay(frame)
-                    self.gpu.draw_cg_surface(frame)
+                    # A GL app (Doom...) presents its own frames: only touch the framebuffer / swap when it drew one.
+                    gl_idle = self.gpu.gl_app and not self.gpu.active_draw_flag
+                    if not gl_idle:
+                        self.gpu.render_frame(self.window, active_app_name=(self.running_app['name'] if self.running_app else ""))
+                        if self.gpu.gl_app:
+                            # The game's own GL frame is already in the back buffer. Compositing the UIKit view tree
+                            # (an opaque black UIWindow/EAGLView) on top of it is what made the window black, so for
+                            # GL apps only draw the touch indicator, on a transparent surface.
+                            if self.touch.show_indicator and (getattr(self.touch, '_fingers', None)
+                                                              or getattr(self.touch, '_primary', None) == ('mouse',)):
+                                overlay = pygame.Surface(self.cg.get_surface().get_size(), pygame.SRCALPHA)
+                                overlay.fill((0, 0, 0, 0))
+                                self.touch.draw_overlay(overlay)
+                                self.gpu.draw_cg_surface(overlay)
+                        else:
+                            frame = self.cpu.compose_frame(self.cg.get_surface())
+                            if frame is not self.cg.get_surface():
+                                self.touch.draw_overlay(frame)
+                            self.gpu.draw_cg_surface(frame)
 
-                pygame.display.flip()
+                if not gl_idle:
+                    pygame.display.flip()
+                    if self.state == "APP" and self.gpu.gl_app:
+                        self.gpu.active_draw_flag = False
                 self.clock.tick(60)
                 if self.state == "APP" and logging.getLogger().isEnabledFor(logging.INFO):
                     self._perf_frames = getattr(self, '_perf_frames', 0) + 1
