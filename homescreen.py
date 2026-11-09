@@ -114,6 +114,38 @@ class IOSHomeScreen:
             logging.error(f"[Loader Error] {e}")
             return None
 
+    @staticmethod
+    def extract_bundle(ipa_path, binary_path):
+        """
+        Unpack the whole .app bundle (Info.plist, nibs, images, sounds, game data) next to the extracted binary.
+        The home screen only pulls out the executable and the icon, but apps read their resources from the
+        bundle folder - without it they can't even find their Info.plist. Done once per app (marker file).
+        """
+        app_dir = os.path.dirname(binary_path)
+        marker = os.path.join(app_dir, '.bundle_complete')
+        if os.path.isfile(marker):
+            return True
+        extracted_dir = os.path.dirname(os.path.dirname(app_dir))        # .../extracted/<name>
+        prefix = f"Payload/{os.path.basename(app_dir)}/"
+        try:
+            with zipfile.ZipFile(ipa_path, 'r') as z:
+                members = [n for n in z.namelist() if n.startswith(prefix) and not n.endswith('/')]
+                logging.info(f"[Loader] extracting {len(members)} bundle files from {os.path.basename(ipa_path)}")
+                failed = 0
+                for name in members:
+                    try:
+                        z.extract(name, extracted_dir)
+                    except Exception:
+                        failed += 1
+                if failed:
+                    logging.warning(f"[Loader] {failed} bundle file(s) could not be extracted")
+            with open(marker, 'w') as f:
+                f.write('ok')
+            return True
+        except Exception as e:
+            logging.error(f"[Loader] could not extract the app bundle: {e}")
+            return False
+
     def total_pages(self):
         total_apps = len(self.apps_metadata)
         if total_apps == 0:
