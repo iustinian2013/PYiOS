@@ -203,8 +203,17 @@ class OpenALEmulator:
             return True
 
         # ================= AL: listener / misc (nothing to spatialise) =================
-        if base in ('alListener3f', 'alListenerf', 'alListenerfv', 'alListeneri', 'alDistanceModel', 'alDopplerFactor',
-                    'alSpeedOfSound', 'alSource3f', 'alSourcefv', 'alSourceQueueBuffers', 'alSourceUnqueueBuffers'):
+        if base in ('alListener3f', 'alListenerf', 'alListenerfv', 'alListeneri', 'alListener3i', 'alListeneriv',
+                    'alDistanceModel', 'alDopplerFactor', 'alSpeedOfSound', 'alSource3f', 'alSource3i', 'alSourcefv',
+                    'alSourceiv', 'alSourceQueueBuffers', 'alSourceUnqueueBuffers', 'alEnable', 'alDisable'):
+            return True
+        if base == 'alGetString':
+            text = {0xB001: 'Apple Computer Inc.', 0xB002: 'OpenAL 1.1 Apple', 0xB003: 'Software',
+                    0xB004: 'AL_EXT_float32'}.get(R0, '')
+            raw = text.encode() + b'\x00'
+            ptr = cpu._c_alloc(len(raw))
+            uc.mem_write(ptr, raw)
+            ret(ptr)
             return True
 
         # ================= AL: buffers =================
